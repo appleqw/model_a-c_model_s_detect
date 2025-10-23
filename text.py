@@ -83,7 +83,7 @@ def plot_time_domain(I,Q,Fs):
     plt.show()
 
 #采样点数量=采样率×信号时长  25.2
-def detect_and_save_pulses(I, Q, Fs, save_dir="pulses", save_path="pulses_time_domain",
+def detect_and_save_pulses(amplitude, Fs, save_dir="pulses", save_path="pulses_time_domain",
                            threshold_factor=3, min_width=22, max_width=28,
                            max_diff_factor=0.3, max_flatness_std=0.2, min_flatness_min_max=0.5):
     """
@@ -95,8 +95,6 @@ def detect_and_save_pulses(I, Q, Fs, save_dir="pulses", save_path="pulses_time_d
     min_width: 脉冲最小宽度（采样点数）
     max_fluctuation: 脉冲内幅度标准差/峰值允许最大值
     """
-    amplitude = np.sqrt(I**2 + Q**2)
-
     # 计算阈值
     noise_mean = np.mean(amplitude)
     noise_std = np.std(amplitude)
@@ -185,38 +183,40 @@ def detect_and_save_pulses(I, Q, Fs, save_dir="pulses", save_path="pulses_time_d
     #
     #
     # # 绘制时域图
-    # os.makedirs(save_path, exist_ok=True)
-    # t = np.arange(len(amplitude)) / Fs
-    # t=t*1e6
-    # plt.figure(figsize=(12, 6))
-    #
-    # # 先画非脉冲部分（紫色）
-    # plt.plot(t, amplitude, color='purple', linewidth=0.5, label="非脉冲")
-    #
-    # # 绘制被舍弃的震荡脉冲（红色）
-    # for (s, e) in discarded_pulses:
-    #     plt.plot(t[s:e], amplitude[s:e], color='red', linewidth=1.0,
-    #              label="舍弃（震荡）" if s == discarded_pulses[0][0] else "")
-    #
-    # # 绘制保留的尖峰脉冲（绿色）
-    # for (s, e) in kept_pulses:
-    #     plt.plot(t[s:e], amplitude[s:e], color='green', linewidth=1.0,
-    #              label="保留（尖峰）" if s == kept_pulses[0][0] else "")
-    #
-    # # 阈值线
-    # plt.axhline(threshold, color='red', linestyle='--', linewidth=1.0, label="阈值")
-    #
-    # plt.title("时域脉冲检测结果")
-    # plt.xlabel("时间 (s)")
-    # plt.ylabel("幅度")
-    # plt.legend()
-    # plt.grid(True)
-    #
-    # plt.tight_layout()
-    # plt.savefig(save_path, dpi=150)
-    # plt.show()
-    #
-    # print(f"已绘制并保存脉冲检测总览图: {save_path}")
+    print(len(amplitude))
+    if len(amplitude)<1e4:
+        os.makedirs(save_path, exist_ok=True)
+        t = np.arange(len(amplitude)) / Fs
+        t=t*1e6
+        plt.figure(figsize=(12, 6))
+
+        # 先画非脉冲部分（紫色）
+        plt.plot(t, amplitude, color='purple', linewidth=0.5, label="非脉冲")
+
+        # 绘制被舍弃的震荡脉冲（红色）
+        for (s, e) in discarded_pulses:
+            plt.plot(t[s:e], amplitude[s:e], color='red', linewidth=1.0,
+                     label="舍弃（震荡）" if s == discarded_pulses[0][0] else "")
+
+        # 绘制保留的尖峰脉冲（绿色）
+        for (s, e) in kept_pulses:
+            plt.plot(t[s:e], amplitude[s:e], color='green', linewidth=1.0,
+                     label="保留（尖峰）" if s == kept_pulses[0][0] else "")
+
+        # 阈值线
+        plt.axhline(threshold, color='red', linestyle='--', linewidth=1.0, label="阈值")
+
+        plt.title("时域脉冲检测结果")
+        plt.xlabel("时间 (s)")
+        plt.ylabel("幅度")
+        plt.legend()
+        plt.grid(True)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.show()
+
+        print(f"已绘制并保存脉冲检测总览图: {save_path}")
 
     # # 创建保存目录
     # os.makedirs(save_dir, exist_ok=True)
@@ -242,29 +242,24 @@ def detect_and_save_pulses(I, Q, Fs, save_dir="pulses", save_path="pulses_time_d
     return kept_pulses, threshold
 
 
-
-
 def detect_model_ac_responses(kept_pulses, Fs, amplitude,
-                             delta_t=1.45,  # 相邻脉冲起始间隔(μs)
-                             pulse_duration=0.45,  # 单个脉冲时长(μs)
-                             total_duration=20.75,  # 总应答时长(μs)
-                             allowed_delta_error=0.1,  # 间隔误差容忍(μs)
-                             allowed_duration_error=0.1):  # 脉冲时长误差容忍(μs)
+                              delta_t=1.45,  # 相邻脉冲起始间隔(μs)
+                              pulse_duration=0.45,  # 单个脉冲时长(μs)
+                              allowed_delta_error=0.1,  # 间隔误差容忍(μs)
+                              allowed_duration_error=0.1):  # 脉冲时长误差容忍(μs)
     """
     检测Model A/C回复信号
-    参数:
-        kept_pulses: 已检测到的单个脉冲(起始/结束采样点)
-        Fs: 采样率(Hz)
-        amplitude: 幅度数据(用于绘图)
-        其他参数: 脉冲时序特征参数
-    返回:
-        符合条件的应答列表(包含脉冲时序信息)
+    新判断逻辑：
+    1. 从P0开始，后续脉冲与P0的间隔必须是1.45μs的整数倍（i=1~14）
+    2. 第7个脉冲位置（间隔10.15μs=1.45*7）若存在脉冲，则不符合
+    3. 必须存在最后一个关键脉冲（间隔20.3μs=1.45*14）
+    4. 任何脉冲与P0的间隔超过20.3μs，则不符合
     """
-    # 1. 转换脉冲为时间信息(微秒)
+    # 1. 转换脉冲为时间信息(微秒)，并计算与P0的间隔（后续会动态更新）
     pulses_info = []
     for (s, e) in kept_pulses:
         t_start = s / Fs * 1e6  # 起始时间(μs)
-        t_end = e / Fs * 1e6    # 结束时间(μs)
+        t_end = e / Fs * 1e6  # 结束时间(μs)
         duration = t_end - t_start  # 实际时长(μs)
         pulses_info.append({
             's': s, 'e': e,
@@ -273,8 +268,8 @@ def detect_model_ac_responses(kept_pulses, Fs, amplitude,
         })
 
     responses = []
-    total_intervals = 14  # P0到P14的间隔数
-    middle_pulse_idx = 7  # 验证脉冲索引(P1-P13中的第7个)
+    max_interval = 14 * delta_t  # 最大允许间隔：14*1.45=20.3μs
+    seventh_interval = 7 * delta_t  # 第7个脉冲的间隔：7*1.45=10.15μs
 
     # 2. 遍历所有可能的前导脉冲(P0)
     for p0 in pulses_info:
@@ -282,60 +277,84 @@ def detect_model_ac_responses(kept_pulses, Fs, amplitude,
         if not (pulse_duration - allowed_duration_error <= p0['duration'] <= pulse_duration + allowed_duration_error):
             continue
 
-        # 计算后导脉冲(P14)的预期起始时间
-        t14_expected = p0['t_start'] + total_intervals * delta_t
+        p0_t_start = p0['t_start']
 
-        # 寻找符合条件的P14候选
-        p14_candidates = [p for p in pulses_info if
-                         (t14_expected - allowed_delta_error <= p['t_start'] <= t14_expected + allowed_delta_error) and
-                         (pulse_duration - allowed_duration_error <= p['duration'] <= pulse_duration + allowed_duration_error)]
+        # 过滤所有与P0间隔超过max_interval的脉冲（这些脉冲直接不符合）
+        valid_pulses = [p for p in pulses_info
+                        if (p['t_start'] - p0_t_start) <= (max_interval + allowed_delta_error) and (p['t_start'] - p0_t_start)>0]
 
-        # 3. 验证P14及中间脉冲
+        # 3. 检查是否存在最后一个关键脉冲（间隔20.3μs）
+        p14_candidates = [p for p in valid_pulses
+                          if abs((p['t_start'] - p0_t_start) - max_interval) <= allowed_delta_error
+                          and (pulse_duration - allowed_duration_error <= p[
+                'duration'] <= pulse_duration + allowed_duration_error)]
+
+        if not p14_candidates:  # 必须存在最后一个关键脉冲
+            continue
+
+
+
+        # 4. 检查中间脉冲（i=1~13）
         for p14 in p14_candidates:
-            # 验证总时长
-            total_actual = p14['t_end'] - p0['t_start']
-            if not (total_duration - 0.2 <= total_actual <= total_duration + 0.2):
-                continue
+            # 标记中间脉冲状态
+            middle_pulses = []
+            valid = True
+            dt=p14['t_start']-p0_t_start
+            if dt>max_interval+allowed_delta_error:
+                valid=False
+                break
 
-            # 检查中间13个脉冲(P1-P13)
-            middle_valid = True
-            middle_pulses = []  # 存储中间脉冲状态(存在/不存在)
-            for idx in range(1, 14):  # 索引1-13
-                t_expected = p0['t_start'] + idx * delta_t  # 该位置预期起始时间
+            for p in valid_pulses:
+                actual_interval = p['t_start'] - p0_t_start
+                k = (actual_interval / 1.45)%1
+                if k > 0.3 and k < 0.7:
+                    valid = False
+                    break
+
+
+            # 遍历1~13倍间隔（对应i=1到13）
+            for i in range(1, 14):
+                expected_interval = i * delta_t
+                # 查找该间隔是否存在符合条件的脉冲
                 found = False
-
-                # 查找该位置是否有脉冲
-                for p in pulses_info:
-                    if (t_expected - allowed_delta_error <= p['t_start'] <= t_expected + allowed_delta_error) and \
-                       (pulse_duration - allowed_duration_error <= p['duration'] <= pulse_duration + allowed_duration_error):
+                for p in valid_pulses:
+                    actual_interval = p['t_start'] - p0_t_start
+                    # 验证间隔是否为1.45的i倍（允许误差）且时长符合
+                    if (abs(actual_interval - expected_interval) <= allowed_delta_error and
+                            pulse_duration - allowed_duration_error <= p[
+                                'duration'] <= pulse_duration + allowed_duration_error):
                         found = True
-                        middle_pulses.append({'idx': idx, 'exists': True, 'pulse': p})
+                        middle_pulses.append({'idx': i, 'exists': True, 'pulse': p, 'interval': actual_interval})
                         break
 
                 if not found:
-                    middle_pulses.append({'idx': idx, 'exists': False, 'pulse': None})
+                    middle_pulses.append({'idx': i, 'exists': False, 'pulse': None, 'interval': None})
 
-                # 验证脉冲(P7)必须不存在
-                if idx == middle_pulse_idx and found:
-                    middle_valid = False
+                # 关键检查：第7个脉冲（i=7）若存在则无效
+                if i == 7 and found:
+                    valid = False
                     break
 
-            if middle_valid:
+            # 5. 额外检查：所有存在的脉冲必须是1.45的整数倍间隔（排除已过滤的超范围脉冲）
+            # （已通过上面的循环确保，因为只检查了i=1~13的倍数）
+
+            if valid:
                 # 记录有效应答
                 responses.append({
                     'p0': p0,
                     'p14': p14,
                     'middle_pulses': middle_pulses,
-                    'start_time': p0['t_start'],  # 应答起始时间(μs)
-                    'end_time': p14['t_end'],     # 应答结束时间(μs)
-                    'amplitude': amplitude        # 幅度数据(用于绘图)
+                    'start_time': p0_t_start,
+                    'end_time': p14['t_end'],
+                    'amplitude': amplitude
                 })
 
-    # 4. 去重(避免同一应答被重复检测)
+    # 6. 去重(避免同一应答被重复检测)
     unique_responses = []
     seen = set()
     for resp in responses:
-        key = (round(resp['start_time'], 3), round(resp['end_time'], 3))
+        # 用P0和P14的起始时间作为唯一标识
+        key = (round(resp['p0']['t_start'], 3), round(resp['p14']['t_start'], 3))
         if key not in seen:
             seen.add(key)
             unique_responses.append(resp)
@@ -414,7 +433,7 @@ def plot_ac_responses(responses, save_dir="model_ac_responses"):
         print(f"已保存应答 {i+1} 图像: {save_path}")
 
 
-def detect_model_s_responses(pulses, Fs, allowed_error=0.2):
+def detect_model_s_responses(pulses, Fs,amplitude, allowed_error=0.2):
     """
     优化版：检测Model S信号，避免重复遍历已确认信号范围内的脉冲
     参数:
@@ -443,7 +462,7 @@ def detect_model_s_responses(pulses, Fs, allowed_error=0.2):
 
     min_1us_width = 0.8  # 1微秒脉冲最小宽度
     max_1us_width = 1.2  # 1微秒脉冲最大宽度
-
+    i = 1
     # 2. 用while循环遍历，灵活控制起始位置
     while current_i < total_pulses:
         # 确保后续至少有4个脉冲（i+1到i+3，i+4用于验证固定区结束）
@@ -475,6 +494,57 @@ def detect_model_s_responses(pulses, Fs, allowed_error=0.2):
             current_i += 1
             continue
 
+        # -------------------------- 新增：检测1毫秒脉冲（目标时间段） --------------------------
+        # 目标时间段：i脉冲起始时间 +8μs 到 +10.5μs
+        window_start_us = t_i + 7   # 窗口起始时间(微秒)
+        window_end_us = t_i + 12  # 窗口结束时间(微秒)
+
+        # 将时间转换为采样点（微秒 -> 采样点：t(μs) * Fs / 1e6）
+        window_start_sample = round(window_start_us * Fs / 1e6)
+        window_end_sample = round(window_end_us * Fs / 1e6)
+
+        # 确保采样点在有效范围内（避免超出IQ数据长度）
+        window_start_sample = max(0, window_start_sample)
+        window_end_sample = min(len(amplitude), window_end_sample)  # I和Q长度需一致
+
+        # 截取目标时间段内的IQ数据
+        amplitude_window = amplitude [window_start_sample:window_end_sample]
+
+
+        # 配置1毫秒（1000μs）脉冲的宽度范围（采样点）
+        # 1000μs对应的采样点数：1000 * Fs / 1e6 = Fs / 1000
+        target_width_us = 1 # 1毫秒
+        min_width = int((target_width_us - 0.2) * Fs / 1e6)  # 允许-200μs误差
+        max_width = int((target_width_us + 0.2) * Fs / 1e6)  # 允许+200μs误差
+        min_width = max(1, min_width)  # 确保最小宽度为正
+
+        # 调用脉冲检测函数，检测窗口内的1毫秒脉冲
+        window_1ms_pulses,_ = detect_and_save_pulses(
+            amplitude =amplitude_window,
+            Fs=Fs,
+            min_width=min_width,    # 1毫秒脉冲的最小宽度（采样点）
+            max_width=max_width,    # 1毫秒脉冲的最大宽度（采样点）
+            save_dir="window_pulses",          # 不需要保存图片时设为None
+            save_path="window_pulses",
+            threshold_factor=0.35,
+            min_flatness_min_max=0.4
+        )
+        us_pulses_info = []
+        for (s, e) in window_1ms_pulses:
+            t_start = s / Fs * 1e6  # 起始时间(微秒)
+            t_end = e / Fs * 1e6  # 结束时间(微秒)
+            us_pulses_info.append({
+                "t_start": t_start-1,#之前筛选是从i脉冲开始之后的7微秒开始的
+                "t_end": t_end,
+                "start_sample": s,
+                "end_sample": e,
+                "index": len(us_pulses_info)  # 记录原始索引，用于定位
+            })
+            print(f"中间脉冲的开始时间为{t_start-1}")
+        us_pulses_info.sort(key=lambda x: x["t_start"])  # 按时间排序
+
+
+        # 将窗口内的脉冲采样点转换为原始IQ数据的全局采样点
         # -------------------------- 新增：数据区前3微秒解码 --------------------------
         # 解码初始化：前5位为0（字符串便于后续修改，索引0对应第一位）
         decoded_bits = ["0", "0", "0", "0", "0"]
@@ -489,7 +559,6 @@ def detect_model_s_responses(pulses, Fs, allowed_error=0.2):
 
         for p in candidate_pulses:
             delta = p["t_start"] - t_i  # 脉冲与i的时间差（微秒）
-            print(f"delta:{delta-8.0}")
             if delta > decode_end + allowed_error:
                 continue  # 超出解码范围，跳过
 
@@ -509,6 +578,32 @@ def detect_model_s_responses(pulses, Fs, allowed_error=0.2):
             # 第五位（索引4）：delta≈10微秒
             elif 10.0 - allowed_error <= delta <= 10.0 + allowed_error:
                 decoded_bits[4] = "1"
+
+        for p in us_pulses_info:
+            delta=p['t_start']
+            if delta > decode_end + allowed_error:
+                continue  # 超出解码范围，跳过
+
+            # 第一位（索引0）：delta≈8微秒
+            if 0.0 - allowed_error <= delta <= 0.0 + allowed_error:
+                decoded_bits[0] = "1"
+                decoded_bits[1] = "1"
+            # 第二位（索引1）：delta≈8.5微秒
+            elif 0.5 - allowed_error <= delta <= 0.5 + allowed_error:
+                decoded_bits[1] = "1"
+                decoded_bits[2] = "1"
+            # 第三位（索引2）：delta≈9微秒
+            elif 1.0 - allowed_error <= delta <= 1.0 + allowed_error:
+                decoded_bits[2] = "1"
+                decoded_bits[3] = "1"
+            # 第四位（索引3）：delta≈9.5微秒
+            elif 1.5 - allowed_error <= delta <= 1.5 + allowed_error:
+                decoded_bits[3] = "1"
+                decoded_bits[4] = "1"
+            # 第五位（索引4）：delta≈10微秒
+            elif 2.0 - allowed_error <= delta <= 2.0 + allowed_error:
+                decoded_bits[4] = "1"
+
 
         decoded_result="".join(decoded_bits)
         if decoded_result=="10001":
@@ -722,7 +817,7 @@ def main(iqh_path,iq_path):
     #采样点数量=采样率×信号时长  25.2
     ac_width=sample_rate * 4.5e-7
 
-    ac_pulses, threshold = detect_and_save_pulses(I, Q, sample_rate,
+    ac_pulses, threshold = detect_and_save_pulses(amplitude, sample_rate,
                                                save_dir=iq_path+"detected_pulses",
                                                threshold_factor=1,
                                                min_width=0.85*ac_width,max_width=1.15*ac_width)
@@ -736,20 +831,20 @@ def main(iqh_path,iq_path):
             print(f"应答 {i+1}: {resp['start_time']:.2f}μs - {resp['end_time']:.2f}μs")
 
         # 第三步：绘制应答信号图像
-        plot_ac_responses(ac_responses)
+        # plot_ac_responses(ac_responses)
     else:
         print("\n未检测到Model A/C应答信号")
 
 #   采样点数=采样率+信号时长  28
     s_width=sample_rate * 5e-7
-    s_pulses, threshold = detect_and_save_pulses(I, Q, sample_rate,
+    s_pulses, threshold = detect_and_save_pulses(amplitude, sample_rate,
                                                save_dir=iq_path+"detected_s_pulses",
                                                threshold_factor=2,
                                                min_width=0.7*s_width,max_width=1.3*s_width,
                                                  max_flatness_std=0.25, min_flatness_min_max=0.45)
     print(f"共有{len(s_pulses)}个0.5微秒脉宽信号")
 
-    s_responses = detect_model_s_responses(
+    s_responses = detect_model_s_responses(amplitude=amplitude,
         pulses=s_pulses,  # 从detect_and_save_pulses得到的0.5微秒脉宽脉冲
         Fs=sample_rate,
         allowed_error=0.2  # 时间间隔误差容忍±0.2微秒
@@ -774,8 +869,8 @@ def main(iqh_path,iq_path):
 
 if __name__ == "__main__":
     # 替换为你的实际文件路径（相对路径/绝对路径均可）
-    IQH_PATH = "data/TCAS_1.09G_20M_20251001_093342.770.iqh"
-    IQ_PATH = "data/TCAS_1.09G_20M_20251001_093342.770.iqb"
+    IQH_PATH = "data/TCAS-40m_1.09G_40M_20251001_174929.391.iqh"
+    IQ_PATH = "data/TCAS-40m_1.09G_40M_20251001_174929.391.iqb"
 
     # 检查文件是否存在
     if not os.path.exists(IQH_PATH):
