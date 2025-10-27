@@ -1,12 +1,18 @@
 import math
 import os
+import threading
+import tkinter as tk
+from tkinter import filedialog, scrolledtext, ttk, messagebox
+from datetime import datetime, timedelta
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
+from PIL import ImageTk  # 修复原代码中tkinter_finder导入问题
 
 from detect_model_s import detect_model_s_responses, plot_model_s_responses
+from gui import IQFileProcessor
 
-matplotlib.use('TkAgg') # 或者 'Qt5Agg', 'WXAgg'
 
 # 全局设置：解决中文显示问题
 plt.rcParams["font.family"] = ["SimHei"]
@@ -124,7 +130,7 @@ def detect_and_save_pulses(amplitude, Fs, save_dir="pulses", save_path="pulses_t
             raw_pulses.append((start, end))
 
     # 计算每个脉冲的峰均比和平坦度
-    print(f"初始有{len(raw_pulses)}个脉冲")
+    # print(f"初始有{len(raw_pulses)}个脉冲")
     pulses_metrics = []  # 存储每个脉冲的指标：(start, end, PAPR, 平坦度1, 平坦度2)
     kept_pulses = []  # 保留：平坦度（标准差）<0.2
     discarded_pulses = []
@@ -182,9 +188,9 @@ def detect_and_save_pulses(amplitude, Fs, save_dir="pulses", save_path="pulses_t
     #
     #
     #
-    # # 绘制时域图
-    print(len(amplitude))
-    if len(amplitude)<1e4:
+    # 绘制时域图
+
+    if threshold_factor>3:
         os.makedirs(save_path, exist_ok=True)
         t = np.arange(len(amplitude)) / Fs
         t=t*1e6
@@ -540,7 +546,7 @@ def detect_model_s_responses(pulses, Fs,amplitude, allowed_error=0.2):
                 "end_sample": e,
                 "index": len(us_pulses_info)  # 记录原始索引，用于定位
             })
-            print(f"中间脉冲的开始时间为{t_start-1}")
+            # print(f"中间脉冲的开始时间为{t_start-1}")
         us_pulses_info.sort(key=lambda x: x["t_start"])  # 按时间排序
 
 
@@ -606,8 +612,10 @@ def detect_model_s_responses(pulses, Fs,amplitude, allowed_error=0.2):
 
 
         decoded_result="".join(decoded_bits)
-        if decoded_result=="10001":
+        if decoded_result=="10001" or decoded_result=="10010" or decoded_result=="10011":
             type="ADS-B"
+        elif decoded_result=="00000" or decoded_result=="10000":
+            type="TCAS"
         else:
             type="others"
         # 4. 数据区检测（找到该信号包含的最远脉冲索引）
@@ -662,7 +670,7 @@ def detect_model_s_responses(pulses, Fs,amplitude, allowed_error=0.2):
     return unique_signals
 
 
-def plot_model_s_responses(signals, pulses, amplitude, Fs, save_dir="model_s_plots"):
+def plot_model_s_responses(signals, pulses, amplitude, Fs, save_dir="model_s_plots",save_path=""):
     """
     绘制Model S回复信号的时域图像并保存
     参数:
@@ -718,6 +726,7 @@ def plot_model_s_responses(signals, pulses, amplitude, Fs, save_dir="model_s_plo
 
         # 5. 提取绘图用的时间轴和幅度数据
         t = np.arange(start_sample, end_sample) * sample_to_us  # 时间轴（微秒）
+        print(f"amplitude长度{len(amplitude)},start_sample位置{start_sample},end_sample位置{end_sample}")
         amp_segment = amplitude[start_sample:end_sample]  # 幅度数据
 
         # 6. 创建图像
@@ -790,93 +799,418 @@ def plot_model_s_responses(signals, pulses, amplitude, Fs, save_dir="model_s_plo
         plt.tight_layout()
 
         # 11. 保存图像
-        save_path = os.path.join(save_dir, f'model_s_signal_{idx}.png')
+        # save_path = os.path.join(save_dir, f'model_s_signal_{idx}.png')
         plt.savefig(save_path, dpi=150)
         plt.close()  # 释放内存
         print(f"已保存Model S信号图像：{save_path}")
-def main(iqh_path,iq_path):
-    # 1. 读取头文件
+
+
+# 新增：从IQ文件名提取起始时间（核心功能）
+def extract_start_time_from_filename(iqh_path):
+    """
+    从IQ头文件路径提取起始时间（如"TCAS_1.09G_20M_20251001_093342.770.iqh" -> 2025-10-01 09:33:42.770）
+    返回：datetime对象
+    """
+    # 提取文件名（不含路径和后缀）
+    filename = os.path.basename(iqh_path)
+    name_without_ext = os.path.splitext(filename)[0]  # 去掉.iqh后缀
+
+    # 分割文件名获取时间部分（格式：YYYYMMDD_HHMMSS.xxx）
+    parts = name_without_ext.split('_')
+    if len(parts) < 5:
+        raise ValueError(f"文件名格式不符合预期，无法提取时间：{filename}")
+    time_str = parts[-2] + '_' + parts[-1]  # 拼接为"20251001_093342.770"
+
+    # 解析为datetime对象
+    try:
+        # 格式：YYYYMMDD_HHMMSS.fff（fff为毫秒）
+        start_time = datetime.strptime(time_str, "%Y%m%d_%H%M%S.%f")
+        return start_time
+    except ValueError:
+        raise ValueError(f"时间格式解析失败，请检查文件名：{time_str}")
+
+
+def main(iqh_path, iq_path):
+    # 1. 从文件名提取IQ文件的起始时间（新增核心步骤）
+    try:
+        iq_start_time = extract_start_time_from_filename(iqh_path)
+        print(f"=== 从文件名提取IQ起始时间：{iq_start_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} ===")
+    except Exception as e:
+        print(f"错误：提取起始时间失败 - {str(e)}")
+        return
+
+    # 2. 读取头文件
     header = read_iqh_header(iqh_path)
     sample_rate = header['SampleRate']
-    data_scale = header['DataScale']
-    num_sample_total=header['NumberSamples']
-    max_samples_per_chunk = 1e6  # 每个分片的最大样本数（保留限制）
-    max_samples_per_chunk = int(max_samples_per_chunk)
-    total_chunks = int(np.ceil(num_sample_total / max_samples_per_chunk))  # 总分片数
-    print(f"成功读取头文件：采样率={sample_rate / 1e6:.1f}MHz，总样本数={header['NumberSamples']}，分{total_chunks}个分片处理（每个分片最多{max_samples_per_chunk}样本）")
-    start_offset=0
-    # 2. 读取IQ数据并转换为幅度
-    I, Q, read_samples = read_iq_data(
-        iq_path,
-        num_sample_total,
-        sample_format,
-        max_samples=5e6,# 读取500万样本（约40MB）
-        start_offset=int(start_offset)
-    )
-    amplitude = np.sqrt(I ** 2 + Q ** 2)
-    #采样点数量=采样率×信号时长  25.2
-    ac_width=sample_rate * 4.5e-7
+    num_sample_total = header['NumberSamples']
+    bytes_per_sample = sample_format().nbytes
+    total_duration_seconds = num_sample_total / sample_rate
 
-    ac_pulses, threshold = detect_and_save_pulses(amplitude, sample_rate,
-                                               save_dir=iq_path+"detected_pulses",
-                                               threshold_factor=1,
-                                               min_width=0.85*ac_width,max_width=1.15*ac_width)
-    print(f"检测到{len(ac_pulses)}个0.45微秒脉宽信号")
 
-    # 第二步：检测Model A/C应答信号
-    ac_responses = detect_model_ac_responses(ac_pulses, sample_rate, amplitude)
-    if ac_responses:
-        print(f"\n共检测到 {len(ac_responses)} 个Model A/C应答信号")
-        for i, resp in enumerate(ac_responses):
-            print(f"应答 {i+1}: {resp['start_time']:.2f}μs - {resp['end_time']:.2f}μs")
+    print(f"=== IQ文件信息 ===")
+    print(f"采样率: {sample_rate} Hz")
+    print(f"总样本数: {num_sample_total}")
+    print(f"总时长: {total_duration_seconds:.2f} 秒")
+    print("==================")
 
-        # 第三步：绘制应答信号图像
-        # plot_ac_responses(ac_responses)
-    else:
-        print("\n未检测到Model A/C应答信号")
+    # 3. 分片配置
+    max_samples_per_chunk = int(5e6)
+    total_chunks = int(np.ceil(num_sample_total / max_samples_per_chunk))
+    # print(f"=== 分片配置：总样本数{num_sample_total}，单分片{max_samples_per_chunk}样本，共{total_chunks}分片 ===")
 
-#   采样点数=采样率+信号时长  28
-    s_width=sample_rate * 5e-7
-    s_pulses, threshold = detect_and_save_pulses(amplitude, sample_rate,
-                                               save_dir=iq_path+"detected_s_pulses",
-                                               threshold_factor=2,
-                                               min_width=0.7*s_width,max_width=1.3*s_width,
-                                                 max_flatness_std=0.25, min_flatness_min_max=0.45)
-    print(f"共有{len(s_pulses)}个0.5微秒脉宽信号")
+    # 4. 初始化信号列表
+    all_ac_responses = []
+    all_s_responses = []
+    max_pulse_width_us = 112  # Model S最大相关时长（确保跨分片脉冲完整）
+    max_pulse_samples = int(max_pulse_width_us * sample_rate / 1e6)
+    prev_tail_amplitude = np.array([])
+    prev_chunk_start_sample = 0
+    num_ac=0
+    num_s=0
 
-    s_responses = detect_model_s_responses(amplitude=amplitude,
-        pulses=s_pulses,  # 从detect_and_save_pulses得到的0.5微秒脉宽脉冲
-        Fs=sample_rate,
-        allowed_error=0.2  # 时间间隔误差容忍±0.2微秒
-    )
-    if s_responses:
-        print(f"\n共检测到{len(s_responses)}个Model S回复信号，开始绘图...")
-        for idx, sig in enumerate(s_responses, 1):
-            print(f"信号{idx}：起始时间：{sig['start_time']:.2f}微秒,数据区长度：{sig['data_length']}微秒")
-        plot_model_s_responses(
-            signals=s_responses,
-            pulses=s_pulses,
-            amplitude=amplitude,  # 原始幅度数据
-            Fs=sample_rate,
-            save_dir="model_s_responses_plots"  # 保存文件夹名称
+    # 5. 循环处理每个分片
+    for chunk_idx in range(total_chunks):
+        # print(f"\n=== 处理分片 {chunk_idx + 1}/{total_chunks} ===")
+        chunk_start_sample = chunk_idx * max_samples_per_chunk
+        chunk_end_sample = min((chunk_idx + 1) * max_samples_per_chunk, num_sample_total)
+        chunk_samples = chunk_end_sample - chunk_start_sample
+        chunk_start_time = chunk_start_sample /sample_rate
+        # print(f"分片全局范围：样本开始时间：{chunk_start_time}秒，样本[{chunk_start_sample}-{chunk_end_sample})，共{chunk_samples}样本")
+
+
+        # 读取当前分片IQ数据
+        start_offset = chunk_start_sample * 2 * bytes_per_sample
+        I_chunk, Q_chunk, read_samples = read_iq_data(
+            filename=iq_path,
+            num_samples=chunk_samples,
+            sample_format=sample_format,
+            max_samples=chunk_samples,
+            start_offset=start_offset
         )
-    else:
-        print("\n未检测到Model S回复信号，不绘图")
+        if read_samples != chunk_samples:
+            print(f"警告：分片实际读取{read_samples}样本（预期{chunk_samples}）")
+
+        # 合并跨分片数据
+        current_amplitude = np.sqrt(I_chunk ** 2 + Q_chunk ** 2)
+        if len(prev_tail_amplitude) > 0:
+            merged_amplitude = np.concatenate([prev_tail_amplitude, current_amplitude])
+            # print(
+            #     f"合并跨分片数据：缓存{len(prev_tail_amplitude)} + 当前{len(current_amplitude)} → 共{len(merged_amplitude)}样本")
+        else:
+            merged_amplitude = current_amplitude.copy()
+
+        # 检测脉冲
+        ac_pulse_width_us = 0.45
+        ac_width = sample_rate * ac_pulse_width_us / 1e6
+        ac_pulses_merged, _ = detect_and_save_pulses(
+            amplitude=merged_amplitude,
+            Fs=sample_rate,
+            threshold_factor=3,
+            min_width=0.85 * ac_width,
+            max_width=1.15 * ac_width,
+        )
+
+        s_pulse_width_us = 0.5
+        s_width = sample_rate * s_pulse_width_us / 1e6
+        s_pulses_merged, _ = detect_and_save_pulses(
+            amplitude=merged_amplitude,
+            Fs=sample_rate,
+            threshold_factor=2,
+            min_width=0.7 * s_width,
+            max_width=1.3 * s_width,
+            max_flatness_std=0.25,
+            min_flatness_min_max=0.45
+        )
+        # hign_pluses, _ = detect_and_save_pulses(
+        #     amplitude=merged_amplitude,
+        #     Fs=sample_rate,
+        #     threshold_factor=10,
+        #     min_width= 0.7* s_width,
+        #     max_width=20 * s_width,
+        # )
+        # print(f"分片内（含缓存）检测到：AC脉冲{len(ac_pulses_merged)}个，S脉冲{len(s_pulses_merged)}个")
+
+        # 筛选当前分片实际脉冲
+        offset_in_merged = len(prev_tail_amplitude)
+        ac_pulses_current = []
+        for (s_rel, e_rel) in ac_pulses_merged:
+            if e_rel <= offset_in_merged:
+                continue
+            s_chunk = max(0, s_rel - offset_in_merged)
+            e_chunk = e_rel - offset_in_merged
+            s_abs = chunk_start_sample + s_chunk
+            e_abs = chunk_start_sample + e_chunk
+            ac_pulses_current.append((s_abs, e_abs))
+
+        s_pulses_current = []
+        for (s_rel, e_rel) in s_pulses_merged:
+            if e_rel <= offset_in_merged:
+                continue
+            s_chunk = max(0, s_rel - offset_in_merged)
+            e_chunk = e_rel - offset_in_merged
+            s_abs = chunk_start_sample + s_chunk
+            e_abs = chunk_start_sample + e_chunk
+            s_pulses_current.append((s_abs, e_abs))
+        # print(f"筛选后当前分片脉冲：AC{len(ac_pulses_current)}个，S{len(s_pulses_current)}个")
+
+        # 检测Model AC信号并转换时间
+        # 检测Model AC信号并转换时间（精确到微秒）
+        if len(ac_pulses_merged) > 0:
+            ac_responses = detect_model_ac_responses(
+                kept_pulses=ac_pulses_merged,
+                Fs=sample_rate,
+                amplitude=merged_amplitude
+            )
+            if ac_responses:
+                # print(f"\n分片检测到 {len(ac_responses)} 个Model A/C信号：")
+                for i, resp in enumerate(ac_responses):
+                    relative_start_sec = resp['start_time'] / 1e6  # 微秒→秒（含小数部分）
+                    absolute_start_time = iq_start_time +timedelta(seconds=chunk_start_time)+ timedelta(seconds=relative_start_sec)
+                    # 修改：时间格式增加%f（微秒，6位）
+                    year = absolute_start_time.year
+                    month = absolute_start_time.month
+                    day = absolute_start_time.day
+                    hour = absolute_start_time.hour
+                    minute = absolute_start_time.minute
+                    second = absolute_start_time.second
+                    microsecond = absolute_start_time.microsecond  # 0-999999
+                    ms = microsecond // 1000  # 毫秒（取前3位）
+                    us = microsecond % 1000  # 剩余微秒（后3位）
+
+                    num_ac+=1
+
+                    # 格式化输出（确保两位/三位数字补零）
+                    print(
+                        f"  A/C信号{num_ac}：开始时间 = {year}年{month:02d}月{day:02d}日{hour:02d}时{minute:02d}分{second:02d}秒{ms:03d}毫秒{us:03d}微秒")
+                all_ac_responses.extend(ac_responses)
+
+        # 检测Model S信号并转换时间（精确到微秒）
+        if len(s_pulses_merged) > 0:
+            s_responses = detect_model_s_responses(
+                pulses=s_pulses_merged,
+                Fs=sample_rate,
+                amplitude=merged_amplitude
+            )
+            if s_responses:
+                # print(f"\n分片检测到 {len(s_responses)} 个Model S信号：")
+                for i, sig in enumerate(s_responses):
+                    relative_start_sec = sig['start_time'] / 1e6  # 微秒→秒（含小数部分）
+                    absolute_start_time = iq_start_time +timedelta(seconds=chunk_start_time)+ timedelta(seconds=relative_start_sec)
+                    # 修改：时间格式增加%f（微秒，6位）
+                    year = absolute_start_time.year
+                    month = absolute_start_time.month
+                    day = absolute_start_time.day
+                    hour = absolute_start_time.hour
+                    minute = absolute_start_time.minute
+                    second = absolute_start_time.second
+                    microsecond = absolute_start_time.microsecond  # 0-999999
+                    ms = microsecond // 1000  # 毫秒（取前3位）
+                    us = microsecond % 1000  # 剩余微秒（后3位）
+
+                    num_s+=1
+
+                    # 格式化输出（确保两位/三位数字补零）
+                    print(
+                        f"  S信号{num_s}：解码：{sig['decoded_bits']},类型：{sig['type']}，开始时间 = {year}年{month:02d}月{day:02d}日{hour:02d}时{minute:02d}分{second:02d}秒{ms:03d}毫秒{us:03d}微秒")
+                all_s_responses.extend(s_responses)
+
+        # 更新跨分片缓存
+        tail_samples = min(max_pulse_samples, len(current_amplitude))
+        prev_tail_amplitude = current_amplitude[-tail_samples:] if tail_samples > 0 else np.array([])
+        prev_chunk_start_sample = chunk_start_sample
+        # print(f"保留当前分片末尾{tail_samples}样本，用于下一分片合并")
 
 
+class IQSignalGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("IQ信号检测工具")
+        self.root.geometry("1100x750")  # 初始窗口大小
+        self.root.resizable(True, True)  # 允许窗口缩放
 
+        # 初始化变量
+        self.iqh_path = tk.StringVar()  # IQ头文件路径
+        self.iq_path = tk.StringVar()   # IQ数据文件路径
+        self.is_processing = False      # 处理状态标记
 
+        # 设置全局字体（解决中文显示问题）
+        self.root.option_add("*Font", ("SimHei", 10))
+        self.style = ttk.Style()
+        self.style.configure(".", font=("SimHei", 10))
+
+        # 创建界面组件
+        self._create_widgets()
+
+        # 重定向print输出到日志框
+        self._redirect_print()
+
+    def _create_widgets(self):
+        """创建GUI所有组件"""
+        # 1. 文件选择区域（顶部）
+        file_frame = ttk.LabelFrame(self.root, text="文件选择（.iqh 头文件 + .iqb 数据文件）")
+        file_frame.pack(fill=tk.X, padx=15, pady=10)
+
+        # IQH头文件选择行
+        ttk.Label(file_frame, text="IQ头文件：").grid(row=0, column=0, padx=5, pady=8, sticky=tk.W)
+        ttk.Entry(file_frame, textvariable=self.iqh_path, width=80).grid(row=0, column=1, padx=5, pady=8)
+        ttk.Button(file_frame, text="浏览", command=self._browse_iqh).grid(row=0, column=2, padx=5, pady=8)
+
+        # IQ数据文件选择行
+        ttk.Label(file_frame, text="IQ数据文件：").grid(row=1, column=0, padx=5, pady=8, sticky=tk.W)
+        ttk.Entry(file_frame, textvariable=self.iq_path, width=80).grid(row=1, column=1, padx=5, pady=8)
+        ttk.Button(file_frame, text="浏览", command=self._browse_iq).grid(row=1, column=2, padx=5, pady=8)
+
+        # 2. 控制按钮区域
+        btn_frame = ttk.Frame(self.root)
+        btn_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        self.start_btn = ttk.Button(btn_frame, text="开始检测", command=self._start_processing)
+        self.start_btn.pack(side=tk.RIGHT, padx=5)
+
+        self.clear_btn = ttk.Button(btn_frame, text="清空日志", command=self._clear_log)
+        self.clear_btn.pack(side=tk.RIGHT, padx=5)
+
+        # 3. 状态提示区域
+        self.status_var = tk.StringVar(value="状态：就绪 - 请选择文件并开始检测")
+        status_label = ttk.Label(self.root, textvariable=self.status_var, foreground="#2c3e50", font=("SimHei", 9))
+        status_label.pack(fill=tk.X, padx=15, pady=5)
+
+        # 4. 日志显示区域（核心，占满剩余空间）
+        log_frame = ttk.LabelFrame(self.root, text="实时检测日志")
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+        # 带滚动条的文本框
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame,
+            wrap=tk.WORD,
+            font=("Consolas", 9),  # 等宽字体，便于日志对齐
+            state=tk.DISABLED,      # 初始禁用编辑
+            bg="#f8f9fa"            # 浅灰色背景，保护视力
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    def _browse_iqh(self):
+        """浏览选择IQ头文件（.iqh）"""
+        file_path = filedialog.askopenfilename(
+            title="选择IQ头文件",
+            filetypes=[("IQ头文件", "*.iqh"), ("所有文件", "*.*")],
+            initialdir=os.getcwd()  # 初始目录为当前工作目录
+        )
+        if file_path:
+            self.iqh_path.set(file_path)
+            # 自动匹配同名IQ数据文件（.iqb）
+            iq_auto_path = os.path.splitext(file_path)[0] + ".iqb"
+            if os.path.exists(iq_auto_path):
+                self.iq_path.set(iq_auto_path)
+                messagebox.showinfo("自动匹配", f"已自动匹配IQ数据文件：\n{os.path.basename(iq_auto_path)}")
+
+    def _browse_iq(self):
+        """浏览选择IQ数据文件（.iqb）"""
+        file_path = filedialog.askopenfilename(
+            title="选择IQ数据文件",
+            filetypes=[("IQ数据文件", "*.iqb"), ("所有文件", "*.*")],
+            initialdir=os.getcwd()
+        )
+        if file_path:
+            self.iq_path.set(file_path)
+
+    def _redirect_print(self):
+        """重定向Python的print输出到日志文本框"""
+        import sys
+
+        class PrintRedirector:
+            def __init__(self, text_widget):
+                self.text_widget = text_widget
+                self.original_stdout = sys.stdout  # 保存原始stdout，便于恢复
+
+            def write(self, message):
+                # 确保在主线程更新UI（避免tkinter线程安全问题）
+                self.text_widget.after(0, self._update_log, message)
+
+            def flush(self):
+                # 兼容stdout的flush方法
+                pass
+
+            def _update_log(self, message):
+                """更新日志文本框（主线程调用）"""
+                self.text_widget.config(state=tk.NORMAL)
+                self.text_widget.insert(tk.END, message)
+                self.text_widget.see(tk.END)  # 自动滚动到最新内容
+                self.text_widget.config(state=tk.DISABLED)
+
+        # 替换stdout为自定义重定向器
+        self.print_redirector = PrintRedirector(self.log_text)
+        sys.stdout = self.print_redirector
+
+    def _start_processing(self):
+        """启动检测（多线程避免界面卡死）"""
+        # 1. 校验文件路径
+        iqh_path = self.iqh_path.get().strip()
+        iq_path = self.iq_path.get().strip()
+
+        if not iqh_path or not iq_path:
+            messagebox.showerror("错误", "请先选择IQ头文件和IQ数据文件！")
+            return
+        if not os.path.exists(iqh_path):
+            messagebox.showerror("错误", f"IQ头文件不存在：\n{iqh_path}")
+            return
+        if not os.path.exists(iq_path):
+            messagebox.showerror("错误", f"IQ数据文件不存在：\n{iq_path}")
+            return
+
+        # 2. 防止重复点击
+        if self.is_processing:
+            messagebox.showwarning("提示", "检测正在进行中，请不要重复点击！")
+            return
+
+        # 3. 更新状态和按钮
+        self.is_processing = True
+        self.start_btn.config(state=tk.DISABLED)
+        self.status_var.set(f"状态：检测中 - 正在处理文件：{os.path.basename(iqh_path)}")
+        self._clear_log()  # 清空历史日志
+        print(f"===== 检测开始时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} =====")
+        print(f"头文件路径：{iqh_path}")
+        print(f"数据文件路径：{iq_path}\n")
+
+        # 4. 启动子线程执行检测（避免阻塞主线程）
+        threading.Thread(
+            target=self._run_detection,
+            args=(iqh_path, iq_path),
+            daemon=True  # 主线程退出时，子线程自动退出
+        ).start()
+
+    def _run_detection(self, iqh_path, iq_path):
+        """子线程：执行核心检测逻辑（调用你原有的main函数）"""
+        try:
+            # 调用你原有的main函数，print输出会自动重定向到日志
+            main(iqh_path, iq_path)
+            # 检测完成
+            self.status_var.set("状态：检测完成 - 日志已保存到界面中")
+            print(f"\n===== 检测完成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} =====")
+        except Exception as e:
+            # 捕获异常并显示
+            error_msg = f"检测过程出错：{str(e)}"
+            self.status_var.set("状态：检测出错 - 请查看日志详情")
+            print(f"\n{error_msg}")
+            messagebox.showerror("检测出错", error_msg)
+        finally:
+            # 恢复按钮和状态
+            self.is_processing = False
+            self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+
+    def _clear_log(self):
+        """清空日志文本框"""
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.config(state=tk.DISABLED)
 
 if __name__ == "__main__":
-    # 替换为你的实际文件路径（相对路径/绝对路径均可）
-    IQH_PATH = "data/TCAS-40m_1.09G_40M_20251001_174929.391.iqh"
-    IQ_PATH = "data/TCAS-40m_1.09G_40M_20251001_174929.391.iqb"
+    # 修复原代码中tkinter导入问题，直接创建主窗口
+    root = tk.Tk()
+    app = IQSignalGUI(root)
+    root.mainloop()
 
-    # 检查文件是否存在
-    if not os.path.exists(IQH_PATH):
-        raise FileNotFoundError(f"找不到IQ头文件：{os.path.abspath(IQH_PATH)}")
-    if not os.path.exists(IQ_PATH):
-        raise FileNotFoundError(f"找不到IQ数据文件：{os.path.abspath(IQ_PATH)}")
-
-    # 启动主程序
-    main(IQH_PATH, IQ_PATH)
+    # 程序退出时恢复stdout（可选）
+    import sys
+    if hasattr(app, 'print_redirector') and app.print_redirector.original_stdout:
+        sys.stdout = app.print_redirector.original_stdout
