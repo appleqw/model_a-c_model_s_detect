@@ -367,76 +367,109 @@ def detect_model_ac_responses(kept_pulses, Fs, amplitude,
 
     return unique_responses
 
-def plot_ac_responses(responses, save_dir="model_ac_responses"):
+
+def format_timestamp(dt):
+    """
+    将datetime对象格式化为文件名专用时间戳
+    输出格式：YYYYMMDD_HHMMSSfff（fff为毫秒，舍弃微秒后3位）
+    """
+    # %f 是6位微秒，取前3位作为毫秒，最终格式如"20251001_093342770"
+    return dt.strftime("%Y%m%d_%H%M%S%f")[:-3]
+
+def plot_ac_responses(responses, merged_amplitude, Fs, save_root_dir="signal_plots"):
+    """
+    绘制Model A/C信号图像（单个信号1个文件，文件名含序号+时间戳）
+    参数：
+        responses: 单个/多个Model A/C信号字典
+        merged_amplitude: 检测时用的合并幅度数据（含跨分片缓存）
+        Fs: 采样率(Hz)
+        save_root_dir: 根保存目录（子目录AC会自动创建）
+    """
     pulse_duration = 0.45
-    """绘制Model A/C应答信号图像"""
-    os.makedirs(save_dir, exist_ok=True)
+    # 创建AC信号专属保存目录
+    ac_save_dir = os.path.join(save_root_dir, "AC")
+    os.makedirs(ac_save_dir, exist_ok=True)
+
     if not responses:
-        print("未检测到Model A/C应答信号")
+        print("未检测到Model A/C信号，无需绘图")
         return
 
-    for i, resp in enumerate(responses):
-        # 提取应答时间范围(扩展1μs便于观察)
-        start = resp['start_time'] - 1
-        end = resp['end_time'] + 1
-        p0 = resp['p0']
-        p14 = resp['p14']
-        amplitude = resp['amplitude']
-        Fs = (p0['e'] - p0['s']) / (p0['duration'] * 1e-6)  # 从脉冲计算采样率
+    # 统一处理单个/多个信号（转为列表）
+    responses_list = responses if isinstance(responses, list) else [responses]
 
-        # 提取绘图用的幅度数据
-        s_start = max(0, int((start - 0.5) * 1e-6 * Fs))  # 起始采样点
-        s_end = min(len(amplitude), int((end + 0.5) * 1e-6 * Fs))  # 结束采样点
-        t_plot = np.arange(s_start, s_end) / Fs * 1e6  # 时间轴(μs)
-        amp_plot = amplitude[s_start:s_end]
+    for resp in responses_list:
+        # 提取信号关键信息（需确保resp包含absolute_start_time和global_seq）
+        if "absolute_start_time" not in resp or "global_seq" not in resp:
+            print("警告：A/C信号缺少时间或序号信息，跳过绘图")
+            continue
 
+        global_seq = resp["global_seq"]
+        absolute_dt = resp["absolute_start_time"]
+        timestamp = format_timestamp(absolute_dt)
+        p0 = resp["p0"]
+        p14 = resp["p14"]
+        start_time_us = resp["start_time"]
+        end_time_us = resp["end_time"]
+
+        # 生成文件名：AC_1_20251001_093342770.png
+        save_filename = f"AC_{global_seq}_{timestamp}.png"
+        save_path = os.path.join(ac_save_dir, save_filename)
+
+        # 提取绘图数据（基于合并幅度数据，确保与检测数据一致）
+        plot_start_us = start_time_us - 1  # 扩展1μs便于观察
+        plot_end_us = end_time_us + 1
+        # 转换时间到采样点（合并数据的相对索引）
+        s_start = max(0, int(plot_start_us * 1e-6 * Fs))
+        s_end = min(len(merged_amplitude), int(plot_end_us * 1e-6 * Fs))
+        t_plot = np.arange(s_start, s_end) / Fs * 1e6  # 时间轴（μs）
+        amp_plot = merged_amplitude[s_start:s_end]
+
+        # 开始绘图
         plt.figure(figsize=(12, 6))
-        plt.plot(t_plot, amp_plot, 'b-', linewidth=0.8, label='信号幅度')
+        plt.plot(t_plot, amp_plot, "b-", linewidth=0.8, label="信号幅度")
 
         # 标记前导脉冲(P0)和后导脉冲(P14)
-        plt.axvspan(p0['t_start'], p0['t_end'], color='green', alpha=0.3, label='前导脉冲(P0)')
-        plt.axvspan(p14['t_start'], p14['t_end'], color='green', alpha=0.3, label='后导脉冲(P14)')
+        plt.axvspan(p0["t_start"], p0["t_end"], color="green", alpha=0.3, label="前导脉冲(P0)")
+        plt.axvspan(p14["t_start"], p14["t_end"], color="green", alpha=0.3, label="后导脉冲(P14)")
 
-        first_missing = True  # 第一个不存在的数据脉冲
-        # 标记中间脉冲(存在的为红色，验证脉冲为黄色虚线)
-        for pulse in resp['middle_pulses']:
-            idx=pulse['idx']
-            t_idx = p0['t_start'] + pulse['idx'] * 1.45  # 该位置预期时间
-            t_expected_start = p0['t_start'] + idx * 1.45
+        first_missing = True  # 控制"脉冲预期区间"图例只显示1次
+        # 标记中间脉冲（存在/不存在、验证脉冲）
+        for pulse in resp["middle_pulses"]:
+            idx = pulse["idx"]
+            t_expected_start = p0["t_start"] + idx * 1.45
+            t_expected_end = t_expected_start + pulse_duration
 
-            # 计算该脉冲的预期时间区间（起始到结束，宽度为脉冲持续时间）
-            t_expected_end = t_expected_start + pulse_duration  # 预期结束时间
-            if pulse['idx'] == 7:  # 验证脉冲
-                plt.axvline(t_idx, color='yellow', linestyle='--', linewidth=2, label='验证脉冲(不存在)')
-            elif pulse['exists']:  # 存在的数据脉冲
-                p = pulse['pulse']
-                plt.axvspan(p['t_start'], p['t_end'], color='red', alpha=0.3, label='数据脉冲(存在)' if pulse['idx']==1 else "")
-            else:  # 不存在的数据脉冲
-                plt.axvline(t_idx, color='gray', linestyle=':', linewidth=1, label='数据脉冲(不存在)' if pulse['idx']==1 else "")
-                # 2. 红色虚线标记预期区间的左右边界（左侧=起始-0.5*时长，右侧=结束+0.5*时长）
-                # 区间宽度为脉冲持续时间，确保覆盖应有的时间范围
-                t_left = t_expected_start  # 预期区间左边界（起始时间）
-                t_right = t_expected_end   # 预期区间右边界（结束时间）
-                plt.axvline(t_left, color='red', linestyle='--', linewidth=1.5,
-                           label='脉冲预期区间' if first_missing else "")
-                plt.axvline(t_right, color='red', linestyle='--', linewidth=1.5)
-                # 更新标记，确保图例只显示一次
-                if first_missing:
-                    first_missing = False
+            if idx == 7:
+                # 验证脉冲（必须不存在）
+                plt.axvline(t_expected_start, color="yellow", linestyle="--", linewidth=2, label="验证脉冲(不存在)")
+            elif pulse["exists"]:
+                # 存在的数据脉冲
+                p = pulse["pulse"]
+                plt.axvspan(p["t_start"], p["t_end"], color="red", alpha=0.3,
+                            label="数据脉冲(存在)" if idx == 1 else "")
+            else:
+                # 不存在的数据脉冲
+                plt.axvline(t_expected_start, color="gray", linestyle=":", linewidth=1,
+                            label="数据脉冲(不存在)" if idx == 1 else "")
+                # 标记脉冲预期区间（红色虚线）
+                plt.axvline(t_expected_start, color="red", linestyle="--", linewidth=1.5,
+                            label="脉冲预期区间" if first_missing else "")
+                plt.axvline(t_expected_end, color="red", linestyle="--", linewidth=1.5)
+                first_missing = False
 
-        plt.xlim(start, end)
-        plt.title(f"Model A/C应答 {i+1} ({resp['start_time']:.2f}μs - {resp['end_time']:.2f}μs)")
+        # 图像美化
+        plt.xlim(plot_start_us, plot_end_us)
+        plt.title(f"Model A/C信号 {global_seq} ({absolute_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]})")
         plt.xlabel("时间 (μs)")
         plt.ylabel("幅度")
-        plt.legend(loc='upper right')
+        plt.legend(loc="upper right")
         plt.grid(alpha=0.3)
 
-        # 保存图像
-        save_path = os.path.join(save_dir, f"ac_response_{i+1}.png")
+        # 保存并关闭图像（释放内存）
         plt.tight_layout()
         plt.savefig(save_path, dpi=150)
         plt.close()
-        print(f"已保存应答 {i+1} 图像: {save_path}")
+        print(f"已保存A/C信号{global_seq}图像：{save_path}")
 
 
 def detect_model_s_responses(pulses, Fs,amplitude, allowed_error=0.2):
@@ -670,140 +703,120 @@ def detect_model_s_responses(pulses, Fs,amplitude, allowed_error=0.2):
     return unique_signals
 
 
-def plot_model_s_responses(signals, pulses, amplitude, Fs, save_dir="model_s_plots",save_path=""):
+def plot_model_s_responses(signals, pulses, merged_amplitude, Fs, save_root_dir="signal_plots"):
     """
-    绘制Model S回复信号的时域图像并保存
-    参数:
-        signals: 从detect_model_s_responses返回的Model S信号列表
-        pulses: 符合0.5微秒脉宽的脉冲列表（(start_sample, end_sample)）
-        amplitude: 原始信号幅度数据（时域）
+    绘制Model S信号图像（单个信号1个文件，文件名含序号+时间戳）
+    参数：
+        signals: 单个/多个Model S信号字典
+        pulses: 检测时用的脉冲列表（s_pulses_merged）
+        merged_amplitude: 检测时用的合并幅度数据（含跨分片缓存）
         Fs: 采样率(Hz)
-        save_dir: 图像保存文件夹
+        save_root_dir: 根保存目录（子目录S会自动创建）
     """
-    # 创建保存文件夹
-    os.makedirs(save_dir, exist_ok=True)
+    # 创建S信号专属保存目录
+    s_save_dir = os.path.join(save_root_dir, "S")
+    os.makedirs(s_save_dir, exist_ok=True)
 
     if not signals:
         print("未检测到Model S信号，无需绘图")
         return
 
-    # 1. 预处理脉冲时间信息（转换采样点到微秒）
+    # 预处理脉冲时间信息（转换采样点到微秒，同原逻辑）
     pulses_info = []
     for (s, e) in pulses:
-        t_start = s / Fs * 1e6  # 脉冲起始时间（微秒）
-        t_end = e / Fs * 1e6  # 脉冲结束时间（微秒）
-        pulses_info.append({
-            "t_start": t_start,
-            "t_end": t_end,
-            "start_sample": s,
-            "end_sample": e
-        })
-    pulses_info.sort(key=lambda x: x["t_start"])  # 按时间排序
+        t_start = s / Fs * 1e6
+        t_end = e / Fs * 1e6
+        pulses_info.append({"t_start": t_start, "t_end": t_end, "start_sample": s, "end_sample": e})
+    pulses_info.sort(key=lambda x: x["t_start"])
 
-    # 2. 遍历每个信号绘图
-    for idx, sig in enumerate(signals, 1):
-        # 提取信号关键参数
-        start_time = sig["start_time"]  # 信号起始时间（微秒）
-        end_time = sig["end_time"]  # 信号结束时间（微秒）
+    # 统一处理单个/多个信号（转为列表）
+    signals_list = signals if isinstance(signals, list) else [signals]
+
+    for sig in signals_list:
+        # 提取信号关键信息（需确保sig包含absolute_start_time和global_seq）
+        if "absolute_start_time" not in sig or "global_seq" not in sig:
+            print("警告：S信号缺少时间或序号信息，跳过绘图")
+            continue
+
+        global_seq = sig["global_seq"]
+        absolute_dt = sig["absolute_start_time"]
+        timestamp = format_timestamp(absolute_dt)
+        start_time_us = sig["start_time"]
+        end_time_us = sig["end_time"]
         decoded_result = sig["decoded_bits"]
-        type=sig["type"]
-        data_length = sig["data_length"]  # 数据区长度（微秒）
-        start_pulse_idx = sig["start_pulse_idx"]  # 起始脉冲在pulses_info中的索引
-        farthest_pulse_idx = sig["farthest_pulse_idx"]  # 最远脉冲索引
+        sig_type = sig["type"]
+        data_length = sig["data_length"]
+        start_pulse_idx = sig["start_pulse_idx"]
+        farthest_pulse_idx = sig["farthest_pulse_idx"]
 
-        # 3. 计算绘图时间范围（扩展10%边界，便于观察）
-        time_pad = (end_time - start_time) * 0.1
-        plot_start = start_time - time_pad
-        plot_end = end_time + time_pad
+        # 生成文件名：S_1_20251001_093342770.png
+        save_filename = f"S_{global_seq}_{timestamp}.png"
+        save_path = os.path.join(s_save_dir, save_filename)
 
-        # 4. 转换时间到采样点（用于提取幅度数据）
-        sample_to_us = 1e6 / Fs  # 1采样点对应的微秒数
-        start_sample = int(plot_start / sample_to_us)
-        end_sample = int(plot_end / sample_to_us)
-        # 防止索引越界
-        start_sample = max(0, start_sample)
-        end_sample = min(len(amplitude), end_sample)
+        # 提取绘图数据（基于合并幅度数据）
+        time_pad = (end_time_us - start_time_us) * 0.1  # 扩展10%边界
+        plot_start_us = start_time_us - time_pad
+        plot_end_us = end_time_us + time_pad
+        # 转换时间到采样点（合并数据的相对索引）
+        sample_to_us = 1e6 / Fs
+        start_sample = max(0, int(plot_start_us / sample_to_us))
+        end_sample = min(len(merged_amplitude), int(plot_end_us / sample_to_us))
+        t_plot = np.arange(start_sample, end_sample) * sample_to_us  # 时间轴（μs）
+        amp_plot = merged_amplitude[start_sample:end_sample]
 
-        # 5. 提取绘图用的时间轴和幅度数据
-        t = np.arange(start_sample, end_sample) * sample_to_us  # 时间轴（微秒）
-        print(f"amplitude长度{len(amplitude)},start_sample位置{start_sample},end_sample位置{end_sample}")
-        amp_segment = amplitude[start_sample:end_sample]  # 幅度数据
-
-        # 6. 创建图像
+        # 开始绘图
         plt.figure(figsize=(12, 6))
+        plt.plot(t_plot, amp_plot, color="navy", linewidth=0.8, label="信号幅度")
 
-        # 绘制时域幅度波形
-        plt.plot(t, amp_segment, color='navy', linewidth=0.8, label='信号幅度')
+        # 标记固定区（8μs）和数据区
+        plt.axvspan(start_time_us, start_time_us + 8, color="lightgreen", alpha=0.3, label="固定区（8μs）")
+        plt.axvspan(start_time_us + 8, end_time_us, color="lightyellow", alpha=0.5, label=f"数据区（{data_length}μs）")
 
-        # 7. 标记固定区（8微秒）和数据区
-        # 固定区背景（浅绿色）
-        plt.axvspan(start_time, start_time + 8,
-                    color='lightgreen', alpha=0.3,
-                    label=f'固定区（8μs）')
-        # 数据区背景（浅黄色）
-        plt.axvspan(start_time + 8, end_time,
-                    color='lightyellow', alpha=0.3,
-                    label=f'数据区（{data_length}μs）')
 
-        # 8. 标记信号内的所有脉冲
-        # 提取当前信号包含的脉冲
-        signal_pulses = pulses_info[start_pulse_idx: farthest_pulse_idx + 1]
+        # 标记信号内的所有脉冲（区分固定区/数据区）
+        signal_pulses = pulses_info[start_pulse_idx: farthest_pulse_idx + 1] if (
+                    start_pulse_idx <= farthest_pulse_idx) else []
         for p in signal_pulses:
-            # 区分固定区和数据区脉冲
-            if p["t_start"] < start_time + 7:
-                # 固定区脉冲（红色）
-                plt.axvspan(p["t_start"], p["t_end"],
-                            color='red', alpha=0.5,
-                            label='固定区脉冲' if p == signal_pulses[0] else "")
-            else:
-                # 数据区脉冲（橙色）
-                plt.axvspan(p["t_start"], p["t_end"],
-                            color='orange', alpha=0.5,
-                            label='数据区脉冲' if p == signal_pulses[4] else "")
+            if p["t_start"] < start_time_us + 7:
+                plt.axvspan(p["t_start"], p["t_end"], color="red", alpha=0.5,
+                            label="固定区脉冲" if p == signal_pulses[0] else "")
+            # else:
+            #     plt.axvspan(p["t_start"], p["t_end"], color="orange", alpha=0.5,
+            #                 label="数据区脉冲" if p == signal_pulses[4] else "")
 
-        # 9. 标记固定区关键脉冲（i, i+1, i+2, i+3）及间隔
-        key_pulses = pulses_info[start_pulse_idx: start_pulse_idx + 4]
+        # 标记固定区关键脉冲（i, i+1, i+2, i+3）及间隔
+        key_pulses = pulses_info[start_pulse_idx: start_pulse_idx + 4] if (
+                    start_pulse_idx + 4 <= len(pulses_info)) else []
         for k, p in enumerate(key_pulses):
-            # 脉冲位置标记（紫色圆点）
-            plt.scatter(p["t_start"], np.max(amp_segment) * 0.9,
-                        color='purple', s=50, zorder=5,
-                        label=f'关键脉冲（i+{k}）' if k == 0 else "")
-            # 标注时间间隔
+            # 关键脉冲标记（紫色圆点）
+            plt.scatter(p["t_start"], np.max(amp_plot) * 0.9, color="purple", s=50, zorder=5,
+                        label=f"关键脉冲（i+{k}）" if k == 0 else "")
+            # 标注脉冲间隔
             if k > 0:
                 delta = p["t_start"] - key_pulses[0]["t_start"]
-                plt.text(
-                    (key_pulses[0]["t_start"] + p["t_start"]) / 2,
-                    np.max(amp_segment) * 0.85,
-                    f'{delta:.1f}μs',
-                    color='purple',
-                    fontsize=9,
-                    ha='center'
-                )
-        plt.text(
-            start_time + (end_time - start_time) * 0.05,  # 水平位置：信号左侧5%
-            np.max(amp_segment) * 0.9,  # 垂直位置：幅度最大值90%处
-            f"解码结果（前5位）：{decoded_result},信号类型{type}",
-            color="darkred",
-            fontsize=10,
-            fontweight="bold",
-            bbox=dict(boxstyle="round", facecolor="lightpink", alpha=0.7)
-        )
-        # 10. 图像美化
-        plt.xlim(plot_start, plot_end)
-        plt.ylim(0, np.max(amp_segment) * 1.1)  # 幅度轴留10%余量
-        plt.title(f'Model S回复信号 {idx}（总长度 {sig["total_length"]}μs）', fontsize=12)
-        plt.xlabel('时间（μs）', fontsize=10)
-        plt.ylabel('幅度', fontsize=10)
-        plt.legend(loc='upper right', fontsize=8)
+                plt.text((key_pulses[0]["t_start"] + p["t_start"]) / 2, np.max(amp_plot) * 0.85,
+                         f"{delta:.1f}μs", color="purple", fontsize=9, ha="center")
+
+        # 添加解码结果标注
+        plt.text(start_time_us + (end_time_us - start_time_us) * 0.05, np.max(amp_plot) * 0.9,
+                 f"解码结果（前5位）：{decoded_result}\n信号类型：{sig_type}",
+                 color="darkred", fontsize=10, fontweight="bold",
+                 bbox=dict(boxstyle="round", facecolor="lightpink", alpha=0.7))
+
+        # 图像美化
+        plt.xlim(plot_start_us, plot_end_us)
+        plt.ylim(0, np.max(amp_plot) * 1.1)  # 幅度轴留10%余量
+        plt.title(f"Model S信号 {global_seq} ({absolute_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]})")
+        plt.xlabel("时间 (μs)")
+        plt.ylabel("幅度")
+        plt.legend(loc="upper right", fontsize=8)
         plt.grid(alpha=0.3)
+
+        # 保存并关闭图像
         plt.tight_layout()
-
-        # 11. 保存图像
-        # save_path = os.path.join(save_dir, f'model_s_signal_{idx}.png')
         plt.savefig(save_path, dpi=150)
-        plt.close()  # 释放内存
-        print(f"已保存Model S信号图像：{save_path}")
-
+        plt.close()
+        print(f"已保存S信号{global_seq}图像：{save_path}")
 
 # 新增：从IQ文件名提取起始时间（核心功能）
 def extract_start_time_from_filename(iqh_path):
@@ -978,11 +991,19 @@ def main(iqh_path, iq_path):
                     us = microsecond % 1000  # 剩余微秒（后3位）
 
                     num_ac+=1
+                    resp['global_seq'] = num_ac
+                    resp['absolute_start_time'] = absolute_start_time
 
                     # 格式化输出（确保两位/三位数字补零）
                     print(
                         f"  A/C信号{num_ac}：开始时间 = {year}年{month:02d}月{day:02d}日{hour:02d}时{minute:02d}分{second:02d}秒{ms:03d}毫秒{us:03d}微秒")
+                plot_ac_responses(
+                    responses=ac_responses,
+                    merged_amplitude=merged_amplitude,
+                    Fs=sample_rate
+                )
                 all_ac_responses.extend(ac_responses)
+
 
         # 检测Model S信号并转换时间（精确到微秒）
         if len(s_pulses_merged) > 0:
@@ -1008,10 +1029,18 @@ def main(iqh_path, iq_path):
                     us = microsecond % 1000  # 剩余微秒（后3位）
 
                     num_s+=1
+                    sig['global_seq'] = num_s
+                    sig['absolute_start_time'] = absolute_start_time
 
                     # 格式化输出（确保两位/三位数字补零）
                     print(
                         f"  S信号{num_s}：解码：{sig['decoded_bits']},类型：{sig['type']}，开始时间 = {year}年{month:02d}月{day:02d}日{hour:02d}时{minute:02d}分{second:02d}秒{ms:03d}毫秒{us:03d}微秒")
+                plot_model_s_responses(
+                    signals=s_responses,
+                    pulses=s_pulses_merged,
+                    merged_amplitude=merged_amplitude,
+                    Fs=sample_rate
+                )
                 all_s_responses.extend(s_responses)
 
         # 更新跨分片缓存
